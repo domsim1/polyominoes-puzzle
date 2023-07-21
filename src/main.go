@@ -1,0 +1,811 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"time"
+
+	rl "github.com/gen2brain/raylib-go/raylib"
+)
+
+const PLAYFIELD_WIDTH = int32(10)
+const PLAYFIELD_LENGTH = int32(24)
+const CELL_SIZE = int32(35)
+const GRID_GAP = int32(2)
+
+type Mino struct {
+	Shape    Shape
+	X        int32
+	Y        int32
+	Rotation int32
+	XO       int32
+	YO       int32
+}
+
+type Shape int32
+
+const (
+	None Shape = iota
+	I
+	J
+	L
+	O
+	S
+	T
+	Z
+)
+
+var I_Block = []int32{
+	0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0,
+	0, 1, 1, 1, 1,
+	0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0,
+}
+
+var J_Block = []int32{
+	2, 0, 0,
+	2, 2, 2,
+	0, 0, 0,
+}
+
+var L_Block = []int32{
+	0, 0, 3,
+	3, 3, 3,
+	0, 0, 0,
+}
+
+var O_Block = []int32{
+	0, 4, 4,
+	0, 4, 4,
+	0, 0, 0,
+}
+
+var S_Block = []int32{
+	0, 5, 5,
+	5, 5, 0,
+	0, 0, 0,
+}
+
+var T_Block = []int32{
+	0, 6, 0,
+	6, 6, 6,
+	0, 0, 0,
+}
+
+var Z_Block = []int32{
+	7, 7, 0,
+	0, 7, 7,
+	0, 0, 0,
+}
+
+var JLSTZ_Offset = [][][]int32{
+	{{0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+	{{0, 0}, {1, 0}, {1, 1}, {0, -2}, {1, -2}},
+	{{0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+	{{0, 0}, {-1, 0}, {-1, 1}, {0, -2}, {-1, -2}},
+}
+
+var I_Offset = [][][]int32{
+	{{0, 0}, {-1, 0}, {2, 0}, {-1, 0}, {2, 0}},
+	{{-1, 0}, {0, 0}, {0, 0}, {0, -1}, {0, 2}},
+	{{-1, -1}, {1, -1}, {-2, -1}, {1, 0}, {-2, 0}},
+	{{0, -1}, {0, -1}, {0, -1}, {0, 1}, {0, -2}},
+}
+
+var O_Offset = [][][]int32{
+	{{0, 0}},
+	{{0, 1}},
+	{{-1, 1}},
+	{{-1, 0}},
+}
+
+var blackAlpha = rl.Color{
+	R: 0,
+	G: 0,
+	B: 0,
+	A: 200,
+}
+
+var static_playfield = make([]int32, PLAYFIELD_WIDTH*PLAYFIELD_LENGTH)
+var bag = []Shape{I, J, L, O, S, T, Z}
+
+var r = rand.New(rand.NewSource(time.Now().UnixNano()))
+var bagIndex = 0
+
+func main() {
+	sizeAreaWidth := (10 * CELL_SIZE)
+	windowWidth := CELL_SIZE*PLAYFIELD_WIDTH + (GRID_GAP * PLAYFIELD_WIDTH) + sizeAreaWidth
+	windowHeight := CELL_SIZE*(PLAYFIELD_LENGTH) + (GRID_GAP * (PLAYFIELD_LENGTH))
+	rl.InitWindow(
+		windowWidth,
+		windowHeight,
+		"Polyominoes Puzzle",
+	)
+
+	rl.InitAudioDevice()
+
+	var background rl.Texture2D
+	{
+		backgroundImage := rl.LoadImage("assets/background.jpg")
+		rl.ImageCrop(backgroundImage, rl.Rectangle{
+			X:      0,
+			Y:      0,
+			Width:  float32(windowWidth),
+			Height: float32(windowHeight),
+		})
+		background = rl.LoadTextureFromImage(backgroundImage)
+		rl.UnloadImage(backgroundImage)
+	}
+
+	music := rl.LoadMusicStream("assets/spaceship.mp3")
+	menuMusic := rl.LoadMusicStream("assets/suspense.mp3")
+	lock := rl.LoadSound("assets/lock.ogg")
+	drop := rl.LoadSound("assets/drop.ogg")
+	rl.PlayMusicStream(music)
+	rl.PlayMusicStream(menuMusic)
+
+	rl.SetTargetFPS(60)
+
+	ShuffleBag()
+	m := &Mino{}
+	NextMino(m)
+
+	sm := &Mino{}
+	UpdateShadowMino(m, sm)
+
+	bm := &Mino{}
+	BufferMino(bm)
+
+	hm := &Mino{
+		Shape: None,
+		X:     (PLAYFIELD_WIDTH) + 3,
+		Y:     10,
+	}
+	holdLock := false
+	totolRows := int32(0)
+
+	fallTimer := float32(0)
+	fallRate := float32(math.Pow(float64(0.8-((float64(totolRows/10))*0.007)), float64(totolRows/10)))
+	fallRateMod := float32(1)
+
+	lockTimer := float32(0)
+	lockRate := float32(0.5)
+	grounded := false
+
+	wobbleCounter := float64(0)
+	wobbleTimer := float32(0)
+	wobbleForce := float64(0)
+
+	score := int32(0)
+	combo := int32(-1)
+	diffBonus := int32(0)
+
+	dasTimer := float32(0)
+	arrTimer := float32(0)
+
+	gameOver := true
+
+	updateScore := func() {
+		rl.PlaySound(lock)
+		lockTimer = 0
+		holdLock = false
+		grounded = false
+		count, isGameOver := WritrMinoToField(m)
+		if isGameOver {
+			gameOver = true
+		} else {
+			if count > 0 {
+				rl.PlaySound(drop)
+				points := int32(0)
+				switch count {
+				case 1:
+					points += 100 * (totolRows + 1)
+					diffBonus = 0
+				case 2:
+					points += 300 * (totolRows + 1)
+					diffBonus = 0
+				case 3:
+					points += 300 * (totolRows + 1)
+					diffBonus = 0
+				case 4:
+					points += 300 * (totolRows + 1)
+					diffBonus += 1
+				}
+				if combo > -1 {
+					points += 50 * combo * (totolRows + 1)
+				}
+				if diffBonus > 1 {
+					points = int32(float32(points) * 1.5)
+				}
+				score += points
+				totolRows += count
+				wobbleTimer = 100
+				wobbleForce = float64(count) * 2
+				wobbleCounter = 0
+				fallRate = float32(math.Pow(float64(0.8-((float64(totolRows/10))*0.007)), float64(totolRows/10)))
+			} else {
+				combo = -1
+				diffBonus = 0
+			}
+			NextMino(m)
+			BufferMino(bm)
+			UpdateShadowMino(m, sm)
+		}
+	}
+
+	update := func() {
+		rl.UpdateMusicStream(music)
+		fallTimer += rl.GetFrameTime()
+		if fallTimer > (fallRate*fallRateMod) || grounded {
+			fallTimer = 0
+			grounded = false
+			canFall := Move(m, 0, 1)
+			if !canFall {
+				grounded = true
+				lockTimer += rl.GetFrameTime()
+				if lockTimer >= lockRate {
+					updateScore()
+				}
+			} else {
+				if rl.IsKeyDown(rl.KeyS) {
+					score += 1
+				}
+			}
+		}
+
+		if rl.IsKeyPressed(rl.KeyJ) {
+			if Rotate(m, -1) {
+				lockTimer = 0
+				UpdateShadowMino(m, sm)
+			}
+		}
+		if rl.IsKeyPressed(rl.KeyK) {
+			if Rotate(m, 1) {
+				lockTimer = 0
+				UpdateShadowMino(m, sm)
+			}
+		}
+		if rl.IsKeyDown(rl.KeyA) {
+			if dasTimer >= 0.167 {
+				if arrTimer >= 0.033 {
+					arrTimer = 0
+					if Move(m, -1, 0) {
+						lockTimer = 0
+						UpdateShadowMino(m, sm)
+					}
+				} else {
+					arrTimer += rl.GetFrameTime()
+				}
+			} else {
+				if dasTimer == 0 {
+					if Move(m, -1, 0) {
+						lockTimer = 0
+						UpdateShadowMino(m, sm)
+					}
+				}
+				dasTimer += rl.GetFrameTime()
+			}
+		}
+		if rl.IsKeyReleased(rl.KeyA) {
+			dasTimer = 0
+			arrTimer = 0
+		}
+		if rl.IsKeyDown(rl.KeyD) {
+			if dasTimer >= 0.167 {
+				if arrTimer >= 0.033 {
+					arrTimer = 0
+					if Move(m, 1, 0) {
+						lockTimer = 0
+						UpdateShadowMino(m, sm)
+					}
+				} else {
+					arrTimer += rl.GetFrameTime()
+				}
+			} else {
+				if dasTimer == 0 {
+					if Move(m, 1, 0) {
+						lockTimer = 0
+						UpdateShadowMino(m, sm)
+					}
+				}
+				dasTimer += rl.GetFrameTime()
+			}
+		}
+		if rl.IsKeyReleased(rl.KeyD) {
+			dasTimer = 0
+			arrTimer = 0
+		}
+		if rl.IsKeyPressed(rl.KeyS) {
+			fallRateMod = 0.02
+		}
+		if rl.IsKeyReleased(rl.KeyS) {
+			fallRateMod = 1
+		}
+
+		if rl.IsKeyPressed(rl.KeyW) {
+			yDif := sm.Y - m.Y
+			score += 2 * yDif
+			m.Y = sm.Y
+			updateScore()
+		}
+
+		if rl.IsKeyPressed(rl.KeySpace) && !holdLock {
+			Hold(m, hm)
+			BufferMino(bm)
+			UpdateShadowMino(m, sm)
+			holdLock = true
+		}
+	}
+
+	for !rl.WindowShouldClose() {
+		if !gameOver {
+			update()
+		} else {
+			rl.UpdateMusicStream(menuMusic)
+			if rl.IsKeyPressed(rl.KeyEnter) {
+				static_playfield = make([]int32, PLAYFIELD_WIDTH*PLAYFIELD_LENGTH)
+				bagIndex = 0
+				ShuffleBag()
+				NextMino(m)
+				UpdateShadowMino(m, sm)
+				BufferMino(bm)
+				hm = &Mino{
+					Shape: None,
+					X:     (PLAYFIELD_WIDTH) + 3,
+					Y:     10,
+				}
+				holdLock = false
+				totolRows = int32(0)
+				fallTimer = float32(0)
+				fallRate = float32(math.Pow(float64(0.8-((float64(totolRows/10))*0.007)), float64(totolRows/10)))
+				fallRateMod = float32(1)
+				lockTimer = float32(0)
+				lockRate = float32(0.5)
+				grounded = false
+				wobbleCounter = float64(0)
+				wobbleTimer = float32(0)
+				wobbleForce = float64(0)
+				score = int32(0)
+				combo = int32(-1)
+				diffBonus = int32(0)
+				dasTimer = float32(0)
+				arrTimer = float32(0)
+				gameOver = false
+			}
+		}
+
+		rl.BeginDrawing()
+		rl.ClearBackground(rl.Black)
+		rl.DrawTexture(background, 0, 0, rl.White)
+		rl.DrawRectangle(0, 0, windowWidth-sizeAreaWidth, windowHeight, blackAlpha)
+
+		for row := int32(4); row < PLAYFIELD_LENGTH; row++ {
+			for col := int32(0); col < PLAYFIELD_WIDTH; col++ {
+				wobble := int32(0)
+				if wobbleTimer > 0 {
+					wobbleCounter += 12 * float64(rl.GetFrameTime())
+					wobble = int32((math.Sin(wobbleCounter) * wobbleForce))
+					wobbleTimer -= rl.GetFrameTime()
+				}
+				rl.DrawRectangle(
+					(col*CELL_SIZE)+(col*GRID_GAP),
+					(row*CELL_SIZE)+(row*GRID_GAP)+wobble,
+					CELL_SIZE, CELL_SIZE, GetFieldColor(row, col))
+			}
+		}
+		matrixSize := int32(3)
+		if m.Shape == I {
+			matrixSize = 5
+		}
+
+		for row := int32(0); row < matrixSize; row++ {
+			for col := int32(0); col < matrixSize; col++ {
+				cell := ReadMinoCell(m, row, col)
+				if cell > 0 {
+					rl.DrawRectangle(
+						((sm.X+col+sm.XO)*CELL_SIZE)+((sm.X+col+sm.XO)*GRID_GAP),
+						((sm.Y+row+sm.YO)*CELL_SIZE)+((sm.Y+row+sm.YO)*GRID_GAP),
+						CELL_SIZE, CELL_SIZE, rl.Gray)
+				}
+			}
+		}
+
+		for row := int32(0); row < matrixSize; row++ {
+			for col := int32(0); col < matrixSize; col++ {
+				cell := ReadMinoCell(m, row, col)
+				if cell > 0 {
+					rl.DrawRectangle(
+						((m.X+col+m.XO)*CELL_SIZE)+((m.X+col+m.XO)*GRID_GAP),
+						((m.Y+row+m.YO)*CELL_SIZE)+((m.Y+row+m.YO)*GRID_GAP),
+						CELL_SIZE, CELL_SIZE, GetCellColor(cell))
+				}
+			}
+		}
+
+		rl.DrawRectangle(
+			((bm.X)*CELL_SIZE)+((bm.X)*GRID_GAP),
+			((bm.Y)*CELL_SIZE)+((bm.Y)*GRID_GAP),
+			(CELL_SIZE*5)+(GRID_GAP*5),
+			(CELL_SIZE*4)+(GRID_GAP*4),
+			blackAlpha,
+		)
+
+		bmMatrixSize := int32(3)
+		if bm.Shape == I {
+			bmMatrixSize = 5
+		}
+		offsetHackX := int32(0)
+		if bm.Shape == I || bm.Shape == O {
+			offsetHackX = CELL_SIZE / 2
+		}
+		offsetHackY := int32(0)
+		if bm.Shape == I {
+			offsetHackY = CELL_SIZE / 2
+		}
+		for row := int32(0); row < bmMatrixSize; row++ {
+			for col := int32(0); col < bmMatrixSize; col++ {
+				cell := ReadMinoCell(bm, row, col)
+				if cell > 0 {
+					rl.DrawRectangle(
+						((bm.X+col+bm.XO)*CELL_SIZE)+((bm.X+col+bm.XO)*GRID_GAP)-offsetHackX,
+						((bm.Y+row+bm.YO)*CELL_SIZE)+((bm.Y+row+bm.YO)*GRID_GAP)-offsetHackY,
+						CELL_SIZE, CELL_SIZE, GetCellColor(cell))
+				}
+			}
+		}
+
+		rl.DrawRectangle(
+			((hm.X)*CELL_SIZE)+((hm.X)*GRID_GAP),
+			((hm.Y)*CELL_SIZE)+((hm.Y)*GRID_GAP),
+			(CELL_SIZE*5)+(GRID_GAP*5),
+			(CELL_SIZE*4)+(GRID_GAP*4),
+			blackAlpha,
+		)
+
+		if hm.Shape != None {
+			hmMatrixSize := int32(3)
+			if hm.Shape == I {
+				hmMatrixSize = 5
+			}
+			offsetHackX := int32(0)
+			if hm.Shape == I || hm.Shape == O {
+				offsetHackX = CELL_SIZE / 2
+			}
+			offsetHackY := int32(0)
+			if hm.Shape == I {
+				offsetHackY = CELL_SIZE / 2
+			}
+			for row := int32(0); row < hmMatrixSize; row++ {
+				for col := int32(0); col < hmMatrixSize; col++ {
+					cell := ReadMinoCell(hm, row, col)
+					if cell > 0 {
+						rl.DrawRectangle(
+							((hm.X+col+hm.XO)*CELL_SIZE)+((hm.X+col+hm.XO)*GRID_GAP)-offsetHackX,
+							((hm.Y+row+hm.YO)*CELL_SIZE)+((hm.Y+row+hm.YO)*GRID_GAP)-offsetHackY,
+							CELL_SIZE, CELL_SIZE, GetCellColor(cell))
+					}
+				}
+			}
+
+		}
+
+		rl.DrawText(
+			fmt.Sprintf("Level: %d", (totolRows/10)+1),
+			(CELL_SIZE*PLAYFIELD_WIDTH)+(GRID_GAP*PLAYFIELD_WIDTH)+5,
+			(CELL_SIZE * 1),
+			CELL_SIZE,
+			rl.White,
+		)
+
+		rl.DrawText(
+			fmt.Sprintf("Score: %d", score),
+			(CELL_SIZE*PLAYFIELD_WIDTH)+(GRID_GAP*PLAYFIELD_WIDTH)+5,
+			(CELL_SIZE * 2),
+			CELL_SIZE,
+			rl.White,
+		)
+
+		if gameOver {
+			rl.DrawText(
+				"Enter to Start!",
+				(CELL_SIZE),
+				(CELL_SIZE * 3),
+				CELL_SIZE,
+				rl.White,
+			)
+		}
+
+		rl.EndDrawing()
+	}
+	rl.CloseWindow()
+}
+
+func Move(mino *Mino, byX int32, byY int32) bool {
+	if DoesMinoFit(mino, mino.YO+byY, mino.XO+byX, mino.Rotation) {
+		mino.X += byX
+		mino.Y += byY
+		return true
+	}
+	return false
+}
+
+func WritrMinoToField(mino *Mino) (int32, bool) {
+	lowestRow := int32(0)
+	gameOver := false
+	matrixSize := int32(3)
+	if mino.Shape == I {
+		matrixSize = 5
+	}
+	for row := int32(0); row < matrixSize; row++ {
+		for col := int32(0); col < matrixSize; col++ {
+			minoCell := ReadMinoCell(mino, row, col)
+			if minoCell == 0 {
+				continue
+			}
+			static_playfield[PLAYFIELD_WIDTH*(row+mino.Y+mino.YO)+(col+mino.X+mino.XO)] = minoCell
+			lowestRow = row + mino.Y + mino.YO
+		}
+	}
+	if lowestRow < 4 {
+		gameOver = true
+	}
+	return ClearRows(), gameOver
+}
+
+func NextMino(mino *Mino) {
+	mino.XO = 0
+	mino.YO = 0
+	mino.Rotation = 0
+	mino.X = (PLAYFIELD_WIDTH / 2) - 2
+	mino.Y = 0
+	mino.Shape = bag[bagIndex]
+	bagIndex += 1
+	if bagIndex > 6 {
+		bagIndex = 0
+		ShuffleBag()
+	}
+}
+
+func BufferMino(mino *Mino) {
+	mino.Shape = bag[bagIndex]
+	mino.X = (PLAYFIELD_WIDTH) + 3
+	mino.Y = 5
+	mino.Rotation = 0
+
+	switch mino.Shape {
+	case I:
+		mino.XO = 0
+		mino.YO = 0
+	default:
+		mino.XO = 1
+		mino.YO = 1
+	}
+}
+
+func Hold(mino *Mino, hold *Mino) {
+	hold.X = (PLAYFIELD_WIDTH) + 3
+	hold.Y = 10
+	shapeToHold := mino.Shape
+	if hold.Shape == None {
+		NextMino(mino)
+	} else {
+		mino.XO = 0
+		mino.YO = 0
+		mino.Rotation = 0
+		mino.X = (PLAYFIELD_WIDTH / 2) - 3
+		mino.Y = 1
+		mino.Shape = hold.Shape
+	}
+	hold.Rotation = 0
+	hold.Shape = shapeToHold
+	switch hold.Shape {
+	case I:
+		hold.XO = 0
+		hold.YO = 0
+	default:
+		hold.XO = 1
+		hold.YO = 1
+	}
+}
+
+func DoesMinoFit(mino *Mino, YO int32, XO int32, r int32) bool {
+	matrixSize := int32(3)
+	if mino.Shape == I {
+		matrixSize = 5
+	}
+	for row := int32(0); row < matrixSize; row++ {
+		for col := int32(0); col < matrixSize; col++ {
+			minoCell := ReadMinoCellR(mino, row, col, r)
+			if minoCell == 0 {
+				continue
+			}
+			fieldCell := ReadFieldCell(row+mino.Y+YO, col+mino.X+XO)
+			if fieldCell != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func Rotate(mino *Mino, by int32) bool {
+	from := mino.Rotation
+	to := mino.Rotation + by
+	if to > 3 {
+		to = 0
+	}
+	if to < 0 {
+		to = 3
+	}
+	switch mino.Shape {
+	case I:
+		YO := I_Offset[to][0][1]
+		XO := I_Offset[to][0][0]
+		if DoesMinoFit(mino, YO, XO, to) {
+			mino.Rotation = to
+			mino.YO = YO
+			mino.XO = XO
+			return true
+		}
+		fromRow := I_Offset[from]
+		toRow := I_Offset[to]
+		for i := 0; i < len(fromRow); i++ {
+			YK := fromRow[i][0] - toRow[i][1]
+			XK := fromRow[i][1] - toRow[i][0]
+			if DoesMinoFit(mino, YO+YK, XO+XK, to) {
+				mino.Rotation = to
+				mino.YO = YO
+				mino.XO = XO
+				mino.Y += YK
+				mino.X += XK
+				return true
+			}
+		}
+	case O:
+		mino.YO = O_Offset[mino.Rotation][0][1]
+		mino.XO = O_Offset[mino.Rotation][0][0]
+		return true
+	default:
+		YO := JLSTZ_Offset[to][0][1]
+		XO := JLSTZ_Offset[to][0][0]
+		if DoesMinoFit(mino, YO, XO, to) {
+			mino.Rotation = to
+			mino.YO = YO
+			mino.XO = XO
+			return true
+		}
+		fromRow := JLSTZ_Offset[from]
+		toRow := JLSTZ_Offset[to]
+		for i := 0; i < len(fromRow); i++ {
+			YK := fromRow[i][0] - toRow[i][1]
+			XK := fromRow[i][1] - toRow[i][0]
+			if DoesMinoFit(mino, YO+YK, XO+XK, to) {
+				mino.Rotation = to
+				mino.YO = YO
+				mino.XO = XO
+				mino.Y += YK
+				mino.X += XK
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func GetMinoIndex(row int32, col int32, r int32, s int32) int32 {
+	switch r % 4 {
+	case 0:
+		return s*row + col
+	case 1:
+		return (s * (s - 1)) + row - (col * s)
+	case 2:
+		return ((s * s) - 1) - (s * row) - col
+	case 3:
+		return (s - 1) - row + (s * col)
+	}
+	panic("AHHH!")
+}
+
+func ReadMinoCellR(mino *Mino, row int32, col int32, r int32) int32 {
+	switch mino.Shape {
+	case I:
+		return I_Block[GetMinoIndex(row, col, r, 5)]
+	case J:
+		return J_Block[GetMinoIndex(row, col, r, 3)]
+	case L:
+		return L_Block[GetMinoIndex(row, col, r, 3)]
+	case O:
+		return O_Block[GetMinoIndex(row, col, r, 3)]
+	case S:
+		return S_Block[GetMinoIndex(row, col, r, 3)]
+	case T:
+		return T_Block[GetMinoIndex(row, col, r, 3)]
+	case Z:
+		return Z_Block[GetMinoIndex(row, col, r, 3)]
+	}
+	panic("AAAH!")
+}
+
+func ReadMinoCell(mino *Mino, row int32, col int32) int32 {
+	return ReadMinoCellR(mino, row, col, mino.Rotation)
+}
+
+func ReadFieldCell(row int32, col int32) int32 {
+	if row >= PLAYFIELD_LENGTH || row < 0 || col >= PLAYFIELD_WIDTH || col < 0 {
+		return 1
+	}
+	return static_playfield[PLAYFIELD_WIDTH*row+col]
+}
+
+func GetFieldColor(row int32, col int32) rl.Color {
+	cell := ReadFieldCell(row, col)
+	return GetCellColor(cell)
+}
+
+func GetCellColor(cell int32) rl.Color {
+	switch cell {
+	case 1:
+		return rl.SkyBlue
+	case 2:
+		return rl.Blue
+	case 3:
+		return rl.Orange
+	case 4:
+		return rl.Yellow
+	case 5:
+		return rl.Lime
+	case 6:
+		return rl.Purple
+	case 7:
+		return rl.Red
+	default:
+		return rl.DarkGray
+	}
+}
+
+func ClearRows() int32 {
+	foundGap := false
+	rowsRemoved := int32(0)
+	for row := int32(PLAYFIELD_LENGTH) - 1; row >= 0; row-- {
+		for col := int32(0); col < PLAYFIELD_WIDTH; col++ {
+			cell := ReadFieldCell(row, col)
+			if cell == 0 {
+				foundGap = true
+				break
+			}
+		}
+		if foundGap {
+			foundGap = false
+			if rowsRemoved > 0 {
+				for col := int32(0); col < PLAYFIELD_WIDTH; col++ {
+					static_playfield[PLAYFIELD_WIDTH*(row+rowsRemoved)+col] = static_playfield[PLAYFIELD_WIDTH*row+col]
+					static_playfield[PLAYFIELD_WIDTH*row+col] = 0
+				}
+			}
+			continue
+		}
+		rowsRemoved += 1
+		for col := int32(0); col < PLAYFIELD_WIDTH; col++ {
+			static_playfield[PLAYFIELD_WIDTH*row+col] = 0
+		}
+	}
+	return rowsRemoved
+}
+
+func ShuffleBag() {
+	r.Shuffle(len(bag), func(i, j int) { bag[i], bag[j] = bag[j], bag[i] })
+}
+
+func UpdateShadowMino(mino *Mino, smino *Mino) {
+	smino.X = mino.X
+	smino.Y = mino.Y
+	smino.Rotation = mino.Rotation
+	smino.XO = mino.XO
+	smino.YO = mino.YO
+	smino.Shape = mino.Shape
+
+	for Move(smino, 0, 1) {
+	}
+}
